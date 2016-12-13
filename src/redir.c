@@ -88,6 +88,7 @@ static void close_and_free_server(EV_P_ server_t *server);
 int verbose        = 0;
 int keep_resolving = 1;
 
+static int obfs      = 0;
 static int ipv6first = 0;
 static int mode      = TCP_ONLY;
 static int auth      = 0;
@@ -182,7 +183,7 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
     server_t *server              = server_recv_ctx->server;
     remote_t *remote              = server->remote;
 
-    ssize_t r = recv(server->fd, remote->buf->array + remote->buf->len,
+    ssize_t r = recv(server->fd, remote->buf->data + remote->buf->len,
                      BUF_SIZE - remote->buf->len, 0);
 
     if (r == 0) {
@@ -240,10 +241,10 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
             port = ntohs(((struct sockaddr_in *)&(server->destaddr))->sin_port);
         }
         if (port == http_protocol->default_port)
-            ret = http_protocol->parse_packet(remote->buf->array,
+            ret = http_protocol->parse_packet(remote->buf->data,
                                               remote->buf->len, &server->hostname);
         else if (port == tls_protocol->default_port)
-            ret = tls_protocol->parse_packet(remote->buf->array,
+            ret = tls_protocol->parse_packet(remote->buf->data,
                                              remote->buf->len, &server->hostname);
         if (ret > 0) {
             server->hostname_len = ret;
@@ -263,7 +264,7 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
         return;
     }
 
-    int s = send(remote->fd, remote->buf->array, remote->buf->len, 0);
+    int s = send(remote->fd, remote->buf->data, remote->buf->len, 0);
 
     if (s == -1) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -303,7 +304,7 @@ server_send_cb(EV_P_ ev_io *w, int revents)
         return;
     } else {
         // has data to send
-        ssize_t s = send(server->fd, server->buf->array + server->buf->idx,
+        ssize_t s = send(server->fd, server->buf->data + server->buf->idx,
                          server->buf->len, 0);
         if (s == -1) {
             if (errno != EAGAIN && errno != EWOULDBLOCK) {
@@ -351,7 +352,7 @@ remote_recv_cb(EV_P_ ev_io *w, int revents)
 
     ev_timer_again(EV_A_ & remote->recv_ctx->watcher);
 
-    ssize_t r = recv(remote->fd, server->buf->array, BUF_SIZE, 0);
+    ssize_t r = recv(remote->fd, server->buf->data, BUF_SIZE, 0);
 
     if (r == 0) {
         // connection closed
@@ -373,6 +374,16 @@ remote_recv_cb(EV_P_ ev_io *w, int revents)
 
     server->buf->len = r;
 
+    if (server->obfs) {
+        if (obfs_http->deobfs_response(server->buf, BUF_SIZE)) {
+            LOGE("invalid obfuscating");
+            close_and_free_remote(EV_A_ remote);
+            close_and_free_server(EV_A_ server);
+            return;
+        }
+        server->obfs = 0;
+    }
+
     int err = ss_decrypt(server->buf, server->d_ctx, BUF_SIZE);
     if (err) {
         LOGE("invalid password or cipher");
@@ -380,7 +391,7 @@ remote_recv_cb(EV_P_ ev_io *w, int revents)
         close_and_free_server(EV_A_ server);
         return;
     }
-    int s = send(server->fd, server->buf->array, server->buf->len, 0);
+    int s = send(server->fd, server->buf->data, server->buf->len, 0);
 
     if (s == -1) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -438,43 +449,43 @@ remote_send_cb(EV_P_ ev_io *w, int revents)
                     port = (((struct sockaddr_in *)&(server->destaddr))->sin_port);
                 }
 
-                abuf->array[abuf->len++] = 3;          // Type 3 is hostname
-                abuf->array[abuf->len++] = server->hostname_len;
-                memcpy(abuf->array + abuf->len, server->hostname, server->hostname_len);
+                abuf->data[abuf->len++] = 3;          // Type 3 is hostname
+                abuf->data[abuf->len++] = server->hostname_len;
+                memcpy(abuf->data + abuf->len, server->hostname, server->hostname_len);
                 abuf->len += server->hostname_len;
-                memcpy(abuf->array + abuf->len, &port, 2);
+                memcpy(abuf->data + abuf->len, &port, 2);
             } else if (AF_INET6 == server->destaddr.ss_family) { // IPv6
-                abuf->array[abuf->len++] = 4;          // Type 4 is IPv6 address
+                abuf->data[abuf->len++] = 4;          // Type 4 is IPv6 address
 
                 size_t in6_addr_len = sizeof(struct in6_addr);
-                memcpy(abuf->array + abuf->len,
+                memcpy(abuf->data + abuf->len,
                        &(((struct sockaddr_in6 *)&(server->destaddr))->sin6_addr),
                        in6_addr_len);
                 abuf->len += in6_addr_len;
-                memcpy(abuf->array + abuf->len,
+                memcpy(abuf->data + abuf->len,
                        &(((struct sockaddr_in6 *)&(server->destaddr))->sin6_port),
                        2);
             } else {                             // IPv4
-                abuf->array[abuf->len++] = 1; // Type 1 is IPv4 address
+                abuf->data[abuf->len++] = 1; // Type 1 is IPv4 address
 
                 size_t in_addr_len = sizeof(struct in_addr);
-                memcpy(abuf->array + abuf->len,
+                memcpy(abuf->data + abuf->len,
                        &((struct sockaddr_in *)&(server->destaddr))->sin_addr, in_addr_len);
                 abuf->len += in_addr_len;
-                memcpy(abuf->array + abuf->len,
+                memcpy(abuf->data + abuf->len,
                        &((struct sockaddr_in *)&(server->destaddr))->sin_port, 2);
             }
 
             abuf->len += 2;
 
             if (auth) {
-                abuf->array[0] |= ONETIMEAUTH_FLAG;
+                abuf->data[0] |= ONETIMEAUTH_FLAG;
                 ss_onetimeauth(abuf, server->e_ctx->evp.iv, BUF_SIZE);
             }
 
             brealloc(remote->buf, remote->buf->len + abuf->len, BUF_SIZE);
-            memmove(remote->buf->array + abuf->len, remote->buf->array, remote->buf->len);
-            memcpy(remote->buf->array, abuf->array, abuf->len);
+            memmove(remote->buf->data + abuf->len, remote->buf->data, remote->buf->len);
+            memcpy(remote->buf->data, abuf->data, abuf->len);
             remote->buf->len += abuf->len;
             bfree(abuf);
 
@@ -484,6 +495,10 @@ remote_send_cb(EV_P_ ev_io *w, int revents)
                 close_and_free_remote(EV_A_ remote);
                 close_and_free_server(EV_A_ server);
                 return;
+            }
+
+            if (obfs) {
+                obfs_http->obfs_request(remote->buf, BUF_SIZE);
             }
 
             ev_io_start(EV_A_ & remote->recv_ctx->io);
@@ -503,7 +518,7 @@ remote_send_cb(EV_P_ ev_io *w, int revents)
         return;
     } else {
         // has data to send
-        ssize_t s = send(remote->fd, remote->buf->array + remote->buf->idx,
+        ssize_t s = send(remote->fd, remote->buf->data + remote->buf->idx,
                          remote->buf->len, 0);
         if (s == -1) {
             if (errno != EAGAIN && errno != EWOULDBLOCK) {
@@ -534,9 +549,9 @@ new_remote(int fd, int timeout)
     remote_t *remote = ss_malloc(sizeof(remote_t));
     memset(remote, 0, sizeof(remote_t));
 
-    remote->recv_ctx            = ss_malloc(sizeof(remote_ctx_t));
-    remote->send_ctx            = ss_malloc(sizeof(remote_ctx_t));
-    remote->buf                 = ss_malloc(sizeof(buffer_t));
+    remote->recv_ctx = ss_malloc(sizeof(remote_ctx_t));
+    remote->send_ctx = ss_malloc(sizeof(remote_ctx_t));
+    remote->buf      = ss_malloc(sizeof(buffer_t));
     balloc(remote->buf, BUF_SIZE);
     memset(remote->recv_ctx, 0, sizeof(remote_ctx_t));
     memset(remote->send_ctx, 0, sizeof(remote_ctx_t));
@@ -592,9 +607,9 @@ new_server(int fd, int method)
     server_t *server = ss_malloc(sizeof(server_t));
     memset(server, 0, sizeof(server_t));
 
-    server->recv_ctx            = ss_malloc(sizeof(server_ctx_t));
-    server->send_ctx            = ss_malloc(sizeof(server_ctx_t));
-    server->buf                 = ss_malloc(sizeof(buffer_t));
+    server->recv_ctx = ss_malloc(sizeof(server_ctx_t));
+    server->send_ctx = ss_malloc(sizeof(server_ctx_t));
+    server->buf      = ss_malloc(sizeof(buffer_t));
     balloc(server->buf, BUF_SIZE);
     memset(server->recv_ctx, 0, sizeof(server_ctx_t));
     memset(server->send_ctx, 0, sizeof(server_ctx_t));
@@ -771,6 +786,7 @@ main(int argc, char **argv)
     char *method     = NULL;
     char *pid_path   = NULL;
     char *conf_path  = NULL;
+    char *obfs_arg   = NULL;
 
     int remote_num = 0;
     ss_addr_t remote_addr[MAX_REMOTE_NUM];
@@ -778,10 +794,12 @@ main(int argc, char **argv)
 
     int option_index                    = 0;
     static struct option long_options[] = {
-        { "mtu",   required_argument, 0, 0 },
-        { "mptcp", no_argument,       0, 0 },
-        { "help",  no_argument,       0, 0 },
-        {       0,                 0, 0, 0 }
+        { "mtu",       required_argument, 0, 0 },
+        { "mptcp",     no_argument,       0, 0 },
+        { "obfs",      required_argument, 0, 0 },
+        { "obfs-args", required_argument, 0, 0 },
+        { "help",      no_argument,       0, 0 },
+        {           0,                 0, 0, 0 }
     };
 
     opterr = 0;
@@ -799,6 +817,12 @@ main(int argc, char **argv)
                 mptcp = 1;
                 LOGI("enable multipath TCP");
             } else if (option_index == 2) {
+                if (strcmp(optarg, OBFS_HTTP_NAME) == 0)
+                    obfs = OBFS_HTTP;
+                LOGI("obfuscating enabled");
+            } else if (option_index == 3) {
+                obfs_arg = optarg;
+            } else if (option_index == 4) {
                 usage();
                 exit(EXIT_SUCCESS);
             }
@@ -967,6 +991,12 @@ main(int argc, char **argv)
         LOGI("onetime authentication enabled");
     }
 
+    if (obfs) {
+        obfs_http->host = obfs_arg;
+        obfs_http->port = atoi(remote_port);
+        LOGI("obfuscating arg: %s", obfs_arg);
+    }
+
     // ignore SIGPIPE
     signal(SIGPIPE, SIG_IGN);
     signal(SIGABRT, SIG_IGN);
@@ -1031,11 +1061,11 @@ main(int argc, char **argv)
     LOGI("listening at %s:%s", local_addr, local_port);
 
     // setuid
-    if (user != NULL && ! run_as(user)) {
+    if (user != NULL && !run_as(user)) {
         FATAL("failed to switch user");
     }
 
-    if (geteuid() == 0){
+    if (geteuid() == 0) {
         LOGI("running from root user");
     }
 

@@ -57,6 +57,7 @@
 
 #include "netutils.h"
 #include "utils.h"
+#include "obfs_http.h"
 #include "tunnel.h"
 
 #ifndef EAGAIN
@@ -93,6 +94,7 @@ char *prefix;
 int verbose        = 0;
 int keep_resolving = 1;
 
+static int obfs      = 0;
 static int ipv6first = 0;
 static int mode      = TCP_ONLY;
 static int auth      = 0;
@@ -179,7 +181,7 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
         return;
     }
 
-    ssize_t r = recv(server->fd, remote->buf->array, BUF_SIZE, 0);
+    ssize_t r = recv(server->fd, remote->buf->data, BUF_SIZE, 0);
 
     if (r == 0) {
         // connection closed
@@ -214,7 +216,7 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
         return;
     }
 
-    int s = send(remote->fd, remote->buf->array, remote->buf->len, 0);
+    int s = send(remote->fd, remote->buf->data, remote->buf->len, 0);
 
     if (s == -1) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -251,7 +253,7 @@ server_send_cb(EV_P_ ev_io *w, int revents)
         return;
     } else {
         // has data to send
-        ssize_t s = send(server->fd, server->buf->array + server->buf->idx,
+        ssize_t s = send(server->fd, server->buf->data + server->buf->idx,
                          server->buf->len, 0);
         if (s == -1) {
             if (errno != EAGAIN && errno != EWOULDBLOCK) {
@@ -307,7 +309,7 @@ remote_recv_cb(EV_P_ ev_io *w, int revents)
     remote_t *remote              = remote_recv_ctx->remote;
     server_t *server              = remote->server;
 
-    ssize_t r = recv(remote->fd, server->buf->array, BUF_SIZE, 0);
+    ssize_t r = recv(remote->fd, server->buf->data, BUF_SIZE, 0);
 
     if (r == 0) {
         // connection closed
@@ -329,6 +331,16 @@ remote_recv_cb(EV_P_ ev_io *w, int revents)
 
     server->buf->len = r;
 
+    if (server->obfs) {
+        if (obfs_http->deobfs_response(server->buf, BUF_SIZE)) {
+            LOGE("invalid obfuscating");
+            close_and_free_remote(EV_A_ remote);
+            close_and_free_server(EV_A_ server);
+            return;
+        }
+        server->obfs = 0;
+    }
+
     int err = ss_decrypt(server->buf, server->d_ctx, BUF_SIZE);
 
     if (err) {
@@ -338,7 +350,7 @@ remote_recv_cb(EV_P_ ev_io *w, int revents)
         return;
     }
 
-    int s = send(server->fd, server->buf->array, server->buf->len, 0);
+    int s = send(server->fd, server->buf->data, server->buf->len, 0);
 
     if (s == -1) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -397,8 +409,8 @@ remote_send_cb(EV_P_ ev_io *w, int revents)
                     if (dns_pton(AF_INET, sa->host, &host) == -1) {
                         FATAL("IP parser error");
                     }
-                    abuf->array[abuf->len++] = 1;
-                    memcpy(abuf->array + abuf->len, &host, host_len);
+                    abuf->data[abuf->len++] = 1;
+                    memcpy(abuf->data + abuf->len, &host, host_len);
                     abuf->len += host_len;
                 } else if (ip.version == 6) {
                     // send as IPv6
@@ -409,8 +421,8 @@ remote_send_cb(EV_P_ ev_io *w, int revents)
                     if (dns_pton(AF_INET6, sa->host, &host) == -1) {
                         FATAL("IP parser error");
                     }
-                    abuf->array[abuf->len++] = 4;
-                    memcpy(abuf->array + abuf->len, &host, host_len);
+                    abuf->data[abuf->len++] = 4;
+                    memcpy(abuf->data + abuf->len, &host, host_len);
                     abuf->len += host_len;
                 } else {
                     FATAL("IP parser error");
@@ -419,22 +431,23 @@ remote_send_cb(EV_P_ ev_io *w, int revents)
                 // send as domain
                 int host_len = strlen(sa->host);
 
-                abuf->array[abuf->len++] = 3;
-                abuf->array[abuf->len++] = host_len;
-                memcpy(abuf->array + abuf->len, sa->host, host_len);
+                abuf->data[abuf->len++] = 3;
+                abuf->data[abuf->len++] = host_len;
+                memcpy(abuf->data + abuf->len, sa->host, host_len);
                 abuf->len += host_len;
             }
 
             uint16_t port = htons(atoi(sa->port));
-            memcpy(abuf->array + abuf->len, &port, 2);
+            memcpy(abuf->data + abuf->len, &port, 2);
             abuf->len += 2;
 
             if (auth) {
-                abuf->array[0] |= ONETIMEAUTH_FLAG;
+                abuf->data[0] |= ONETIMEAUTH_FLAG;
                 ss_onetimeauth(abuf, server->e_ctx->evp.iv, BUF_SIZE);
             }
 
             int err = ss_encrypt(abuf, server->e_ctx, BUF_SIZE);
+
             if (err) {
                 bfree(abuf);
                 LOGE("invalid password or cipher");
@@ -443,7 +456,11 @@ remote_send_cb(EV_P_ ev_io *w, int revents)
                 return;
             }
 
-            int s = send(remote->fd, abuf->array, abuf->len, 0);
+            if (obfs) {
+                obfs_http->obfs_request(remote->buf, BUF_SIZE);
+            }
+
+            int s = send(remote->fd, abuf->data, abuf->len, 0);
 
             bfree(abuf);
 
@@ -473,7 +490,7 @@ remote_send_cb(EV_P_ ev_io *w, int revents)
             return;
         } else {
             // has data to send
-            ssize_t s = send(remote->fd, remote->buf->array + remote->buf->idx,
+            ssize_t s = send(remote->fd, remote->buf->data + remote->buf->idx,
                              remote->buf->len, 0);
             if (s == -1) {
                 if (errno != EAGAIN && errno != EWOULDBLOCK) {
@@ -506,9 +523,9 @@ new_remote(int fd, int timeout)
 
     memset(remote, 0, sizeof(remote_t));
 
-    remote->buf                 = ss_malloc(sizeof(buffer_t));
-    remote->recv_ctx            = ss_malloc(sizeof(remote_ctx_t));
-    remote->send_ctx            = ss_malloc(sizeof(remote_ctx_t));
+    remote->buf      = ss_malloc(sizeof(buffer_t));
+    remote->recv_ctx = ss_malloc(sizeof(remote_ctx_t));
+    remote->send_ctx = ss_malloc(sizeof(remote_ctx_t));
     balloc(remote->buf, BUF_SIZE);
     memset(remote->recv_ctx, 0, sizeof(remote_ctx_t));
     memset(remote->send_ctx, 0, sizeof(remote_ctx_t));
@@ -561,9 +578,9 @@ new_server(int fd, int method)
     server_t *server = ss_malloc(sizeof(server_t));
     memset(server, 0, sizeof(server_t));
 
-    server->buf                 = ss_malloc(sizeof(buffer_t));
-    server->recv_ctx            = ss_malloc(sizeof(server_ctx_t));
-    server->send_ctx            = ss_malloc(sizeof(server_ctx_t));
+    server->buf      = ss_malloc(sizeof(buffer_t));
+    server->recv_ctx = ss_malloc(sizeof(server_ctx_t));
+    server->send_ctx = ss_malloc(sizeof(server_ctx_t));
     balloc(server->buf, BUF_SIZE);
     memset(server->recv_ctx, 0, sizeof(server_ctx_t));
     memset(server->send_ctx, 0, sizeof(server_ctx_t));
@@ -734,6 +751,7 @@ main(int argc, char **argv)
     char *pid_path   = NULL;
     char *conf_path  = NULL;
     char *iface      = NULL;
+    char *obfs_arg   = NULL;
 
     int remote_num = 0;
     ss_addr_t remote_addr[MAX_REMOTE_NUM];
@@ -744,10 +762,12 @@ main(int argc, char **argv)
 
     int option_index                    = 0;
     static struct option long_options[] = {
-        { "mtu",   required_argument, 0, 0 },
-        { "mptcp", no_argument,       0, 0 },
-        { "help",  no_argument,       0, 0 },
-        {       0,                 0, 0, 0 }
+        { "mtu",       required_argument, 0, 0 },
+        { "mptcp",     no_argument,       0, 0 },
+        { "obfs",      required_argument, 0, 0 },
+        { "obfs-args", required_argument, 0, 0 },
+        { "help",      no_argument,       0, 0 },
+        {           0,                 0, 0, 0 }
     };
 
     opterr = 0;
@@ -770,6 +790,12 @@ main(int argc, char **argv)
                 mptcp = 1;
                 LOGI("enable multipath TCP");
             } else if (option_index == 2) {
+                if (strcmp(optarg, OBFS_HTTP_NAME) == 0)
+                    obfs = OBFS_HTTP;
+                LOGI("obfuscating enabled");
+            } else if (option_index == 3) {
+                obfs_arg = optarg;
+            } else if (option_index == 4) {
                 usage();
                 exit(EXIT_SUCCESS);
             }
@@ -958,6 +984,12 @@ main(int argc, char **argv)
         LOGI("onetime authentication enabled");
     }
 
+    if (obfs) {
+        obfs_http->host = obfs_arg;
+        obfs_http->port = atoi(remote_port);
+        LOGI("obfuscating arg: %s", obfs_arg);
+    }
+
     // parse tunnel addr
     parse_addr(tunnel_addr_str, &tunnel_addr);
 
@@ -1037,12 +1069,12 @@ main(int argc, char **argv)
     LOGI("listening at %s:%s", local_addr, local_port);
 
     // setuid
-    if (user != NULL && ! run_as(user)) {
+    if (user != NULL && !run_as(user)) {
         FATAL("failed to switch user");
     }
 
 #ifndef __MINGW32__
-    if (geteuid() == 0){
+    if (geteuid() == 0) {
         LOGI("running from root user");
     }
 #endif

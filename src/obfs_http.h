@@ -1,5 +1,5 @@
 /*
- * obfs-http.h - Interfaces of http obfuscating function
+ * obfs_http.h - Interfaces of http obfuscating function
  *
  * Copyright (C) 2013 - 2016, Max Lv <max.c.lv@gmail.com>
  *
@@ -25,6 +25,6 @@
 
 #include "obfs.h"
 
-const obfs_t *const http_obfs;
+obfs_t *const obfs_http;
 
 #endif

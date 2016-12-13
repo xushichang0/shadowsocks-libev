@@ -164,7 +164,7 @@ typedef struct buffer {
     size_t idx;
     size_t len;
     size_t capacity;
-    char   *array;
+    char   *data;
 } buffer_t;
 
 typedef struct chunk {
