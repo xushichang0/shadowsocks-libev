@@ -24,6 +24,8 @@
 #include "config.h"
 #endif
 
+#include <strings.h>
+
 #include "obfs_http.h"
 #include "base64.h"
 
@@ -174,10 +176,9 @@ check_http_header(buffer_t *buf)
     if (len < 4)
         return -1;
 
-    if (data[0] == 'G' && data[1] == 'E' && data[2] == 'T')
+    if (strncasecmp(data, "GET", 3) == 0)
         return 1;
-    else if (data[0] == 'H' && data[1] == 'T'
-             && data[2] == 'T' && data[3] == 'P')
+    else if (strncasecmp(data, "HTTP", 4) == 0)
         return 1;
 
     return 0;
