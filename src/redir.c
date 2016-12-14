@@ -50,6 +50,7 @@
 
 #include "http.h"
 #include "tls.h"
+#include "obfs_http.h"
 #include "netutils.h"
 #include "utils.h"
 #include "common.h"
