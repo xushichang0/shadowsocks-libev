@@ -457,7 +457,7 @@ remote_send_cb(EV_P_ ev_io *w, int revents)
             }
 
             if (obfs) {
-                obfs_http->obfs_request(remote->buf, BUF_SIZE);
+                obfs_http->obfs_request(abuf, BUF_SIZE);
             }
 
             int s = send(remote->fd, abuf->data, abuf->len, 0);
@@ -589,6 +589,7 @@ new_server(int fd, int method)
     server->recv_ctx->connected = 0;
     server->send_ctx->server    = server;
     server->send_ctx->connected = 0;
+    server->obfs                = obfs;
 
     if (method) {
         server->e_ctx = ss_malloc(sizeof(struct enc_ctx));

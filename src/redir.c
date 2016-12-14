@@ -618,6 +618,7 @@ new_server(int fd, int method)
     server->recv_ctx->connected = 0;
     server->send_ctx->server    = server;
     server->send_ctx->connected = 0;
+    server->obfs                = obfs;
 
     server->hostname     = NULL;
     server->hostname_len = 0;

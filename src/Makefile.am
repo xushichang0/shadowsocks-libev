@@ -30,7 +30,8 @@ sni_src = http.c \
           tls.c \
           rule.c
 
-obfs_src = obfs_http.c
+obfs_src = obfs_http.c \
+		   base64.c
 
 ss_local_SOURCES = utils.c \
                    jconf.c \

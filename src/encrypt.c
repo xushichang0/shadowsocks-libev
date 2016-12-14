@@ -593,7 +593,7 @@ bytes_to_key(const cipher_t *cipher, const digest_type_t *md,
 }
 
 int
-rand_bytes(uint8_t *output, int len)
+rand_bytes(void *output, int len)
 {
     randombytes_buf(output, len);
     // always return success

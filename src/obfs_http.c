@@ -25,24 +25,24 @@
 #endif
 
 #include "obfs_http.h"
+#include "base64.h"
 
 static const char *http_request_template =
     "GET / HTTP/1.1\r\n"
     "Host: %s\r\n"
     "User-Agent: curl/7.%d.%d\r\n"
-    "Accept: */*\r\n"
+    "Upgrade: websocket\r\n"
+    "Connection: Upgrade\r\n"
+    "Sec-WebSocket-Key: %s\r\n"
     "\r\n";
 
 static const char *http_response_template =
-    "HTTP/1.1 200 OK\r\n"
+    "HTTP/1.1 101 Switching Protocols\r\n"
     "Server: nginx/1.%d.%d\r\n"
     "Date: %s\r\n"
-    "Content-Type: text/html\r\n"
-    "Content-Length: %d\r\n"
-    "Content-Encoding: gzip\r\n"
-    "Connection: keep-alive\r\n"
-    "Cache-Control: private, no-cache, no-store, proxy-revalidate, no-transform\r\n"
-    "Pragma: no-cache\r\n"
+    "Upgrade: websocket\r\n"
+    "Connection: Upgrade\r\n"
+    "Sec-WebSocket-Accept: %s\r\n"
     "\r\n";
 
 static int obfs_http_request(buffer_t *, size_t);
@@ -73,15 +73,20 @@ obfs_http_request(buffer_t *buf, size_t cap)
 
     char host_port[256];
     char http_header[512];
+    uint8_t key[16];
+    char b64[64];
 
     if (obfs_http->port != 80)
         snprintf(host_port, sizeof(host_port), "%s:%d", obfs_http->host, obfs_http->port);
     else
         snprintf(host_port, sizeof(host_port), "%s", obfs_http->host);
 
+    rand_bytes(key, 16);
+    base64_encode(b64, 64, key, 16);
+
     size_t obfs_len =
         snprintf(http_header, sizeof(http_header), http_request_template,
-                 host_port, major_version, minor_version);
+                 host_port, major_version, minor_version, b64);
     size_t buf_len = buf->len;
 
     brealloc(buf, obfs_len + buf_len, cap);
@@ -105,6 +110,8 @@ obfs_http_response(buffer_t *buf, size_t cap)
 
     char http_header[512];
     char datetime[64];
+    uint8_t key[16];
+    char b64[64];
 
     time_t now;
     struct tm *tm_now;
@@ -113,10 +120,13 @@ obfs_http_response(buffer_t *buf, size_t cap)
     tm_now = localtime(&now);
     strftime(datetime, 64, "%a, %d %b %Y %H:%M:%S GMT", tm_now);
 
+    rand_bytes(key, 16);
+    base64_encode(b64, 64, key, 16);
+
     size_t buf_len  = buf->len;
     size_t obfs_len =
         snprintf(http_header, sizeof(http_header), http_response_template,
-                 major_version, minor_version, datetime, buf_len);
+                 major_version, minor_version, datetime, b64);
 
     brealloc(buf, obfs_len + buf_len, cap);
 
