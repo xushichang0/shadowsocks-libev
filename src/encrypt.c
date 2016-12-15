@@ -425,8 +425,8 @@ enc_table_init(const char *pass)
 
     for (i = 0; i < 256; ++i)
         enc_table[i] = i;
-    for (i = 1; i < 1024; ++i)
-        merge_sort(enc_table, 256, i, key);
+    // for (i = 1; i < 1024; ++i)
+    //     merge_sort(enc_table, 256, i, key);
     for (i = 0; i < 256; ++i)
         // gen decrypt table from encrypt table
         dec_table[enc_table[i]] = i;
